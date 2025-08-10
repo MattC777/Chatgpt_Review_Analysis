@@ -3,7 +3,7 @@ This project analyzes user reviews of ChatGPT collected from the Google Play Sto
 <br>
 
 ## Data Source
-The raw dataset was obtained from the Google Play reviews export of the ChatGPT app.
+The raw dataset was obtained from the Google Play reviews export of the ChatGPT app(Chatgpt_Web_Scraping.ipynb). 
 
 Format: CSV
 
