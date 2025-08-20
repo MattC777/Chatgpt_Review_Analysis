@@ -625,6 +625,20 @@ flowchart
     H[Snowflake + CSV Results]
 ```
 
+```mermaid
+flowchart TD
+    A([Raw Reviews]) --> B[Text Cleaning]
+    B --> C[TF-IDF Vectorization<br/>1–3 grams, stop words, filters]
+    C --> D[Topic Modeling<br/>NMF, auto-select K]
+    D --> E[Topic Keywords & Naming]
+    D --> F[Representative Reviews<br/>rep score + MMR]
+    D --> G[Topic Summary<br/>share %, thumbs stats]
+    E --> H[(Output Tables)]
+    F --> H
+    G --> H
+    H[(Snowflake + CSV Results)]
+```
+
 ## Adjustable Parameter Chart from the Python File (where you can adjust): 
 
 EN_PROP_MIN：English Proportion(default 0.60).
