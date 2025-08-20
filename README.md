@@ -296,3 +296,355 @@ Several key insights were identified during the data quality and exploratory ana
 - **Non-ASCII characters**: Around 22% of reviews contain non-ASCII characters. A subset of these (2900 reviews) are extremely short and appear to consist only of emojis or symbols. These reviews may need to be excluded from future text modeling tasks due to their lack of semantic content or handled in a separate way.
 
 These insights inform both the limitations and opportunities of the dataset. Further refinement may be required depending on the modeling objectives.
+
+
+## ChatGPT Google Play Reviews — Product-Centric Analysis
+
+After performing general **EDA (Exploratory Data Analysis)** on the ChatGPT Google Play reviews dataset, it became clear that going further into **product-team-centric insights** was necessary.  
+While descriptive EDA (score distributions, correlation with thumbs-up, etc.) helps us understand data quality and user behavior patterns, product managers and developers need **actionable feedback**:  
+*What are the main user pain points? How large are they? Which ones should be prioritized for fixes or improvements?*
+
+The following content contains the next step in the analysis pipeline: **automated topic modeling and prioritization of user complaints**, with results written both to Snowflake tables and local CSVs.
+
+**The code is located in Chatgpt_Analysis.ipynb** 
+
+---
+
+## What this analysis does
+
+### 0. Filtering Low-Score Reviews (Pre-Step in Snowflake)
+
+Before running text analysis, I created a **Snowflake view** (e.g., `V_LOW_SCORE_CLEAN`) to filter reviews:
+
+```sql
+CREATE OR REPLACE VIEW V_LOW_SCORE_CLEAN AS
+SELECT
+  REVIEW_ID,
+  SCORE,
+  THUMBS_UP_COUNT,
+  APP_VERSION,
+  REVIEW_TIME,
+  CONTENT
+FROM CHATGPT_REVIEWS
+WHERE SCORE <= 2
+  AND CONTENT IS NOT NULL
+  AND LENGTH(TRIM(CONTENT)) >= 10;
+```
+
+- Only keep **low-star reviews (1–2 stars)**.  
+- Exclude empty or null text.  
+
+This ensures downstream analysis focuses on **pain points** (review with low scores) instead of generic positive feedback.  
+
+
+### 1. Text Cleaning
+- Keep only predominantly English reviews (In order to be kept, a review need to have its 60% content written in English).  
+```python
+EN_PROP_MIN      = 0.60
+
+def english_prop(s: str) -> float:
+    s = str(s or "")
+    letters = sum(ch.isalpha() for ch in s)
+    en_letters = sum('a' <= ch.lower() <= 'z' for ch in s)
+    return (en_letters / letters) if letters else 0.0
+```
+- Remove URLs, punctuation, and meaningless tokens.  
+```python
+CANON_MAP = {
+    r"\blog in\b": "login", r"\blogin\b": "login", r"\bsign in\b": "login",
+    r"\b2fa\b": "mfa", r"\b2-factor\b": "mfa", r"\b2 factor\b": "mfa",
+    r"\bslow\b": "lag", r"\blaggy\b": "lag", r"\blag\b": "lag",
+    r"\bprice\b": "pricing", r"\bcharged?\b": "billing",
+    r"\brefunds?\b": "refund", r"\bsubscription\b": "subscribe",
+    r"\bcrash(es|ed|ing)?\b": "crash",
+    r"\bdoesn['’]?t work\b": "not_working",
+    r"\bisn['’]?t working\b": "not_working",
+    r"\bnot working\b": "not_working",
+}
+
+def canon_replace(text: str) -> str:
+    t = text
+    for pat, rep in CANON_MAP.items(): t = re.sub(pat, rep, t)
+    return t
+
+def clean_text(s: str) -> str:
+    t = str(s or "").lower()
+    t = re.sub(r"http\S+|www\S+", " ", t)         # Get rid of URL
+    t = canon_replace(t)                          # Treat similar words as the same one
+    t = re.sub(r"[^a-z0-9\s']", " ", t)           # Only English letter, numbers, space and comma
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+```
+
+- Discard overly short reviews (len < 10).  
+```python
+df = df[df["text_clean"].str.len() >= 10]
+```
+Steps above ensure that the text going into the model is clean and comparable.
+
+---
+
+### 2. Vectorization (TF-IDF)
+- Convert reviews into numerical vectors with **TF-IDF weighting**.  
+  - TF (Term Frequency): The more frequently a word appears in a review, the more important it is within that review.
+  - IDF (Inverse Document Frequency): The rarer a word is across all reviews, the more it helps distinguish topics, thus giving it a higher weight.
+- Use **1–3 grams** (single words, bigrams, trigrams) so phrases like “login issue” or “unable to connect” are captured.  
+  - For example, a reviews is `"App runs slow."` By using **1–3 grams**, we would get "App", "runs", "slow", "App runs", "runs slow", "App runs slow".
+- Apply **noise filters**:  
+  - `min_df=12`: Remove extremely rare typos/noise. It indicates that a word needs to be presented in at least 12 reviews to be kept.
+  - `max_df=0.40`: Remove overly common words that don’t help (e.g., “app”, “please”). It indicates that if a word show in greater than 40% of reviews, we would drop it.
+  - Stop words (general + domain-specific).
+    ```python
+    DOMAIN_STOP = {
+        "app","apps","chatgpt","openai","ai","gpt","version","versions","update","updated",
+        "fix","fixed","issue","issues","problem","problems","bug","bugs","please","pls",
+        "thanks","thank","hi","hello","team","dear","experience","experiences",
+        "nice","good","bad","very","best","worst","useful","useless","helpful","not",
+        "really","actually","also","ever","always","never","still","just","well","ok",
+        "work","works","working","worked","proper","properly","application"
+    }
+    STOP_WORDS = list(sk_text.ENGLISH_STOP_WORDS.union(DOMAIN_STOP))
+    ```
+
+TF-IDF vectorization produces a sparse matrix where each review is represented by its most informative terms. Each review now becomes a vector. 
+
+---
+
+### 3. Topic Modeling (NMF with Automatic K Selection)
+- Let's call the matrix we get from the TF-IDF vectorization `X`. It looks like below:
+- #### TF-IDF = TF × IDF (example)
+
+  | Reviews/Words   | charged | freezing | login | password | refund | reset | slow |
+  |-----------|---------|----------|-------|----------|--------|-------|------|
+  | **Review1**    | 0       | 0        | 0.693 | 0        | 0      | 0     | 0    |
+  | **Review2**    | 0       | 0        | 0.693 | 1.386    | 0      | 1.386 | 0    |
+  | **Review3**    | 0       | 1.386    | 0     | 0        | 0      | 0     | 1.386|
+  | **Review4**    | 1.386   | 0        | 0     | 0        | 1.386  | 0     | 0    |
+
+- Use **Non-Negative Matrix Factorization (NMF)** to decompose reviews into **topics**.
+  -  Decomposition: `X` = `W` * `H` 
+  - The matrix `W` refers to Reviews × Topic Strength, how strongly each review belongs to each topic.  
+  - The degree of match between each review and each topic. For example, the 5th review has a strength of 0.8 on the “login issues” topic, but only 0.1 on the“performance slowdown” topic. It looks like below:
+
+    | Reviews/Topics             | Topic0 (Login/Auth) | Topic1 (Performance) | Topic2 (Billing) |
+    |------------------|---------------------|-----------------------|------------------|
+    | **R1 “cannot login”**      | **0.90**              | 0.00                  | 0.00             |
+    | **R2 “login password reset”** | **0.85**              | 0.00                  | 0.00             |
+    | **R3 “slow freezing”**     | 0.00                  | **0.95**              | 0.00             |
+    | **R4 “charged refund”**    | 0.00                  | 0.00                  | **0.92**         |
+  
+  - The matrix `H` refers to Topics × Word Weights, which words characterize each topic.
+  - Shows the most representative words for each topic. For example, in the “login issues” topic, the weights of login / password / cannot / reset are relatively high. It looks like below: 
+
+    | Topics/Words                   | charged | freezing | login | password | refund | reset | slow |
+    |------------------------|---------|----------|-------|----------|--------|-------|------|
+    | **Topic0 (Login/Auth)** | 0.00    | 0.00     | **0.80** | **0.70**   | 0.00   | **0.65** | 0.00 |
+    | **Topic1 (Performance)** | 0.00    | **0.75** | 0.00  | 0.00     | 0.00   | 0.00  | **0.78** |
+    | **Topic2 (Billing)**    | **0.82** | 0.00     | 0.00  | 0.00     | **0.80** | 0.00  | 0.00 |
+
+- For each K (number of topics), there would be a unique combination of `W` and `H`. The system automatically selects the number of topics (K) in range 6–12 by scores, which are calculated based on different `H`. 
+- There are two metrics for score calculating: 
+  - **Independence**: topics should be distinct.  
+  - **Sparsity**: each topic should have a few sharp keywords, not a vague range of words. 
+  ```python   
+  def score_topics(H):
+      sim = cosine_similarity(H)            # Independence: we want this to be small (similarity between different topics should be small)
+      np.fill_diagonal(sim, 0.0)
+      inter_sim = sim.mean()
+      sparsity = (H < (H.mean(axis=1, keepdims=True))).mean()  # Sparsity: we want this to be large (the fewer words that can represent a topic, the better)
+      return (1 - inter_sim) * 0.6 + sparsity * 0.4        # score which serves as proof to determine which K should we choose
+
+  def fit_nmf_with_best_k(X):
+      best = None
+      for k in K_RANGE:
+          nmf = NMF(n_components=k, init="nndsvda", random_state=42, max_iter=400)
+          W = nmf.fit_transform(X); H = nmf.components_          #
+          s = score_topics(H)
+          if (best is None) or (s > best["score"]): best = {"k": k, "model": nmf, "W": W, "H": H, "score": s}
+      return best
+  ```
+The combination of `W` and `H` with the greatest score will be choosen. At that moment, K is determined. 
+Steps above automatically discover themes like *Login Issues*, *Performance Lag*, *Billing Problems*, etc.
+
+---
+
+### 4. Topic Keywords and Naming (shown in the topics_keywords_.csv)
+- Extract top keywords from each topic (only English).  
+```python
+def _is_english_phrase(s: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z]+(?: [A-Za-z]+)*", s or ""))
+```
+
+- Apply simple **rule-based mapping** to auto-name topics:  
+  - If keywords include login/password → **Login / Account**  
+  - If billing/payment/refund → **Billing / Subscription**  
+  - Otherwise, fallback to top 3 keywords.  
+```python
+NAME_RULES = [
+    ("Login / Account",     ["login","account","password","otp","mfa","verification"]),
+    ("Billing / Subscription",["billing","subscribe","payment","pricing","refund","charge"]),
+    ("Performance / Crash", ["lag","slow","freeze","loading","crash","latency"]),
+    ("Answer Quality",      ["answer","response","quality","accuracy","wrong","hallucination"]),
+    ("Access / Region",     ["region","country","available","access","blocked","unsupported"]),
+    ("UI / Usability",      ["ui","ux","button","menu","dark mode","layout"]),
+]
+
+def auto_name(keywords: list[str]) -> str:
+    kw_join = " ".join(keywords)
+    for name, needles in NAME_RULES:
+        if any(n in kw_join for n in needles): return name
+    eng = [w for w in keywords if _is_english_phrase(w)]
+    return ", ".join(eng[:3]).title() if eng else "General"
+```
+Steps above give PMs an easy-to-read label for each theme without diving into raw keywords.
+
+---
+
+### 5. Representative Reviews (shown in the topics_example_.csv)
+- Each review is assigned to its strongest topic.  
+- For each review, compute a **representative score**:  
+$$
+\text{representative score} = \text{topic strength} \times \log(\text{thumbs-up}+1)
+$$
+- Representative scores balance *how typical* the review is of the theme and *how many users agree*. 
+- After representative scores are calculated, there are 2 additional steps to finizalize the representative reviews: 
+  - Remove near-duplicates **(Jaccard similarity)**.  
+  - Apply **MMR (Maximal Marginal Relevance)** to select **Top 5 diverse examples per topic**.  
+
+Steps above provide PMs with “golden sample” reviews: both representative and varied.
+
+---
+
+### 6. Topic Summary (PM Dashboard View, shown in the topics_summary_.csv)
+- For each topic, compute:  
+  - **share_pct**: percentage of reviews belonging to this topic.  
+  - **thumbs_avg / thumbs_median**: average and median thumbs-up count.  
+  - **sample_size**: number of reviews in this topic.  
+- Output a **summary table**, sorted by topic number.  
+
+Acts as a **quantitative view** for prioritization:  
+- *Large share + high thumbs-up* = major pain point, high priority.  
+- *Smaller share but extreme thumbs-up* = niche but critical issue.
+
+---
+
+## Outputs
+Each run generates three result tables (written to both CSV and Snowflake):  
+
+1. **`topics_keywords`** → Top keywords + assigned topic name.  
+2. **`topics_examples`** → Representative sample reviews per topic.  
+3. **`topics_summary`** → Aggregated stats per topic for prioritization.  
+
+
+### Snowflake vs Local CSV Outputs
+
+Our pipeline produces results in **two destinations**:  
+
+- **Local CSVs**:  
+  - `topics_keywords_<timestamp>.csv`  
+  - `topics_examples_<timestamp>.csv`  
+  - `topics_summary_<timestamp>.csv`  
+  - Each run generates a fresh set of CSV files with a unique timestamp (e.g., `20250817_143015`).  
+  - CSVs are useful for **quick offline review** or sharing snapshots.
+
+- **Snowflake Tables**:  
+  - `TOPICS_KEYWORDS`  
+  - `TOPICS_EXAMPLES`  
+  - `TOPICS_SUMMARY`  
+  - Each table includes an extra column: **`run_at`**, automatically populated with the current timestamp when rows are inserted.  
+  - This `run_at` column enables us to distinguish **which rows belong to which run**.  
+
+---
+
+### Daily Update Logic
+
+Before inserting new rows, the pipeline executes:
+
+```sql
+DELETE FROM <table>
+WHERE DATE(run_at) = CURRENT_DATE();
+```
+- This ensures that only today’s old rows are cleared before writing fresh results. Runs from previous days are preserved, so the tables naturally accumulate a daily history of topic modeling outputs.
+- If you re-run the pipeline multiple times on the same day, the day’s data will be replaced with the latest results.
+- If you run it tomorrow, new rows for that date will be appended, while yesterday’s rows remain intact.
+
+### Thoughts behind why I make Snowflake output different from CSV(local) output
+This design makes it possible to:
+- Build an automated daily pipeline in the future.
+- Query topic trends over time (e.g., “compare Login issues between 08-16 and 08-17”).
+- Keep a full historical archive without manual file management.
+
+### Example Timeline
+
+| Date   | Run # | CSV Output                         | Snowflake Output                                         |
+|--------|-------|------------------------------------|----------------------------------------------------------|
+| 08-16  | 1     | `topics_*_20250816_10150.csv`      | Rows with `run_at = 2025-08-16`                          |
+| 08-17  | 1     | `topics_*_20250817_09020.csv`      | Rows with `run_at = 2025-08-17` appended (08-16 history remains)  |
+| 08-17  | 2     | `topics_*_20250817_12100.csv`      | Old `08-17` rows deleted, replaced with latest           |
+| 08-17  | 3     | `topics_*_20250817_18300.csv`      | Old `08-17` rows deleted, replaced with latest           |
+| 08-18  | 1     | `topics_*_20250818_08350.csv`      | Rows with `run_at = 2025-08-18` appended (08-16 & 08-17 history remain) |
+
+
+### A Brief View of How Outputs look like (CSV)
+`topics_keywords_<timestamp>.csv`  
+
+- ![topics keywords example](topic_keywords_example.png)
+
+`topics_examples_<timestamp>.csv` 
+
+- ![topics reviews example](topic_reviews_exmaple.png)
+
+`topics_summary_<timestamp>.csv`  
+
+- ![topics summary example](summary_example.png)
+
+---
+
+## Value to Product Team
+This analysis transforms thousands of free-text reviews into a structured dashboard of **pain points, representative examples, and quantitative impact measures**.  
+It enables product managers to:  
+- Quickly see what issues matter most.  
+- Validate fixes against user feedback.  
+- Prioritize roadmap decisions with data-driven evidence.  
+
+---
+
+## Pipeline Overview
+
+```mermaid
+flowchart 
+    A[Raw Reviews] --> B[Text Cleaning]
+    B --> C[TF-IDF Vectorization<br/>(1-3 grams, stop words, filters)]
+    C --> D[NMF Topic Modeling<br/>(auto-select K)]
+    D --> E[Topic Keywords + Naming]
+    D --> F[Representative Reviews<br/>(rep score + MMR)]
+    D --> G[Topic Summary<br/>(share %, thumbs stats)]
+    E --> H[Output Tables]
+    F --> H
+    G --> H
+    H[Snowflake + CSV Results]
+```
+
+## Parameter chart from the python file (where you can adjust): 
+
+EN_PROP_MIN：English Proportion(default 0.60).
+
+MIN_DF / MAX_DF / MAX_FEATURES：Control the vocabulary size and filtering strength for TF-IDF.
+
+K_RANGE：The range for automatically selecting K.
+
+TOPN_WORDS：Number of keywords displayed per topic.
+
+EXAMPLES_PER_TP：Number of representative reviews selected per topic.
+
+MMR_LAMBDA、DEDUP_JACCARD：Diversity and deduplication strength of representative reviews.
+
+DOMAIN_STOP：Domain-specific stopwords; add filler/noise words here when discovered.
+
+
+
+
+
+
+
+

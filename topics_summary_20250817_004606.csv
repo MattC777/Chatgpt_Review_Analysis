@@ -1,0 +1,13 @@
+topic,topic_name,share_pct,thumbs_avg,thumbs_median,sample_size
+0,Performance / Crash,16.35,0.04395604395604396,0.0,910
+1,"Like, Don Like, Amazing",2.91,2.2037037037037037,0.0,162
+2,"Time, Waste, Waste Time",6.29,1.2285714285714286,0.0,350
+3,Answer Quality,7.53,0.7804295942720764,0.0,419
+4,"Image, Generate, Create",6.09,0.8967551622418879,0.0,339
+5,Answer Quality,3.49,5.025773195876289,0.0,194
+6,"Hai, Bahut, Nahi",6.18,0.08139534883720931,0.0,344
+7,Access / Region,4.22,4.51063829787234,0.0,235
+8,"Photo, Edit, Editing",3.75,0.5215311004784688,0.0,209
+9,Login / Account,3.83,0.20187793427230047,0.0,213
+10,Answer Quality,5.57,0.8161290322580645,0.0,310
+11,"Doesn, Money, Make",33.79,1.8399787347155767,0.0,1881
