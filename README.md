@@ -612,20 +612,6 @@ It enables product managers to:
 ## Pipeline Overview
 
 ```mermaid
-flowchart 
-    A[Raw Reviews] --> B[Text Cleaning]
-    B --> C[TF-IDF Vectorization(1-3 grams, stop words, filters)]
-    C --> D[NMF Topic Modeling(auto-select K)]
-    D --> E[Topic Keywords + Naming]
-    D --> F[Representative Reviews(rep score + MMR)]
-    D --> G[Topic Summary(share percentage, thumbs stats)]
-    E --> H[Output Tables]
-    F --> H
-    G --> H
-    H[Snowflake + CSV Results]
-```
-
-```mermaid
 flowchart TD
     A([Raw Reviews]) --> B[Text Cleaning]
     B --> C[TF-IDF Vectorization<br/>1–3 grams, stop words, filters]
