@@ -614,18 +614,18 @@ It enables product managers to:
 ```mermaid
 flowchart 
     A[Raw Reviews] --> B[Text Cleaning]
-    B --> C[TF-IDF Vectorization<br/>(1-3 grams, stop words, filters)]
-    C --> D[NMF Topic Modeling<br/>(auto-select K)]
+    B --> C[TF-IDF Vectorization(1-3 grams, stop words, filters)]
+    C --> D[NMF Topic Modeling(auto-select K)]
     D --> E[Topic Keywords + Naming]
-    D --> F[Representative Reviews<br/>(rep score + MMR)]
-    D --> G[Topic Summary<br/>(share %, thumbs stats)]
+    D --> F[Representative Reviews(rep score + MMR)]
+    D --> G[Topic Summary(share percentage, thumbs stats)]
     E --> H[Output Tables]
     F --> H
     G --> H
     H[Snowflake + CSV Results]
 ```
 
-## Parameter chart from the python file (where you can adjust): 
+## Adjustable Parameter Chart from the Python File (where you can adjust): 
 
 EN_PROP_MIN：English Proportion(default 0.60).
 
